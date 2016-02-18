@@ -2,17 +2,15 @@
 
 # Doc: https://www.percona.com/doc/percona-xtrabackup/2.1/howtos/recipes_ibkx_gtid.html
 
-- name: WAIT_FOR | source data (prevent rsync bug) - TODO find another hack
-  wait_for: host={{ mysql_slave_import_from }} port=22
+- debug: var=mysql_slave_import_from
 
 - name: COMMAND | Prepare backup another server
   command: innobackupex --no-timestamp {{ mysql_backup_dir }} creates={{ mysql_backup_dir }}
   delegate_to: "{{ mysql_slave_import_from }}"
   register: backup
 
-- name: SHELL | Dump
-  shell: innobackupex --apply-log {{ mysql_backup_dir }}
-  delegate_to: "{{ mysql_slave_import_from }}"
+- name: FILE | Create tmp backup dir on slave 
+  file: path={{ mysql_restore_dir }} state=directory
   when: backup.changed
 
 - name: FILE | Remove mysql db from backup
@@ -20,32 +18,48 @@
   delegate_to: "{{ mysql_slave_import_from }}"
   when: backup.changed and not mysql_slave_replicate_mysqldb
 
+- name: COMMAND | Get /etc/mysql/my.cnf from source 
+  command: cat /etc/mysql/debian.cnf 
+  when: mysql_slave_replicate_mysqldb
+  delegate_to: "{{ mysql_slave_import_from }}"
+  register: debiancnf
+  changed_when: false
+
+- name: COPY | Deploy /etc/mysql/debian.cnf to the slave
+  copy: >
+    content={{ debiancnf.stdout }}
+    dest=/etc/mysql/debian.cnf
+    mode=0600
+
 - name: MYSQL_VARIABLES | Get datadir
   mysql_variables: variable=datadir
   register: datadir
 
 - name: SET_FACT | related to mysql datadir
   set_fact:
-    mysql_mysql_datadir: "{{ datadir.msg[0][1] }}"
-    mysql_binlog_info: "{{ datadir.msg[0][1] }}/xtrabackup_binlog_info"
+    mysql_mysql_datadir: "{{ datadir.msg }}"
+    mysql_binlog_info: "{{ mysql_restore_dir }}/xtrabackup_binlog_info"
+
+- name: LOCAL_ACTION FILE | Create fetch dir
+  become: no
+  local_action: file path={{ mysql_fetch_dir }} state=directory    
+
+- name: SYNCHRONIZE | Get data from server
+  synchronize: >
+    src="{{ mysql_backup_dir }}/"
+    dest="{{ mysql_fetch_dir }}/"
+    delete=yes
+  delegate_to: "{{ mysql_slave_import_from }}"
+  register: sync
 
 - name: SERVICE | Stop MySQL before importing data
   service: name=mysql state=stopped
 
-- name: COMMAND | Sync backup to slave - TODO remove vagrant as static user (see why mysql_backup_user is not working)
-  shell: "sudo -E rsync --rsync-path='sudo rsync' -a -e 'ssh -o StrictHostKeyChecking=no' vagrant@{{ mysql_slave_import_from }}:{{ mysql_backup_dir }}/ {{ mysql_mysql_datadir }}/"
-  become: no
-
-- name: FILE | Re-apply owner
-  file: >
-    path={{ mysql_mysql_datadir }}
-    state=directory
-    owner=mysql
-    group=mysql
-    recurse=yes
-
-- name: SERVICE | Start MySQL
-  service: name=mysql state=started
+- name: SYNCHRONIZE | Push data to the slave
+  synchronize: >
+    src="{{ mysql_fetch_dir }}/"
+    dest="{{ mysql_restore_dir }}"
+    delete=yes
 
 - name: SHELL | Get master_log_file
   command: awk '{ print $1 }' {{ mysql_binlog_info }}
@@ -65,8 +79,29 @@
     mysql_master_log_pos: "{{ master_log_pos.stdout }}"
     mysql_master_gtid: "{{ master_gtid.stdout }}"
 
-- name: FILE | Delete dump
+- name: COMMAND | Prepare restore 
+  command: innobackupex --apply-log {{ mysql_restore_dir }}
+  when: sync.changed
+
+- name: COMMAND | Restore
+  command: innobackupex --copy-back {{ mysql_restore_dir }}
+  when: sync.changed
+
+- name: FILE | Re-apply owner
+  file: >
+    path={{ mysql_mysql_datadir }}
+    state=directory
+    owner=mysql
+    group=mysql
+    recurse=yes
+
+- name: SERVICE | Start MySQL
+  service: name=mysql state=started
+
+- name: FILE | Delete dump on source server
   file: path={{ mysql_backup_dir }} state=absent
   delegate_to: "{{ mysql_slave_import_from }}"
   when: mysql_slave_import_flush_dump
 
+- name: FILE | Delete dump on destination server
+  file: path={{ mysql_restore_dir }} state=absent

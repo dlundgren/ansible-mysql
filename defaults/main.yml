@@ -86,6 +86,8 @@ mysql_replication_host: '192.168.0.1'
 mysql_replication_port: '3306'
 
 mysql_backup_dir: '/var/backups/tmp-mysql'
+mysql_restore_dir: '/tmp/mysql-restore-tmp'
+mysql_fetch_dir: './fetch'
 
 # Master
 mysql_max_binlog_size: "100M"

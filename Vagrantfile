@@ -26,6 +26,7 @@ Vagrant.configure("2") do |config|
 		v.cpus = 1
 		v.memory = 256
 	end
+	config.ssh.insert_key = false
 
 	vms.each do |vm|
 		config.vm.define vm[0] do |m|
@@ -41,7 +42,7 @@ Vagrant.configure("2") do |config|
 					vm[3][2] => vm[0],
 					vm[3][3] => vm[0],
 				}
-				ansible.verbose = 'vv'
+				ansible.verbose = 'vvv'
 				ansible.sudo = true
 			end
 		end
